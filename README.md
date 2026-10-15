@@ -82,3 +82,9 @@ make deploy DECK_IP=<your-deck-ip>
 ## License
 
 NetMerge is released under the MIT License. See `LICENSE` and `THIRD-PARTY-NOTICES.md` for full terms.
+
+## AI Disclosure
+
+This project is AI-assisted.
+- **Agent used:** Antigravity IDE (Gemini 3.8 Flash (High))
+

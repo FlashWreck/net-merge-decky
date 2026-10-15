@@ -134,6 +134,9 @@ function NetMergeContent() {
         .then((st) => {
           if (mounted) {
             setStatus(st);
+            if (st.on) {
+              setErrorMsg(null);
+            }
           }
         })
         .catch(() => {

@@ -194,7 +194,11 @@ class Plugin:
         if not status.get("running"):
             if enabled:
                 await self._start_daemon(start_on=True)
-                await asyncio.sleep(0.5)
+                for _ in range(25):
+                    await asyncio.sleep(0.1)
+                    st = await self.get_status()
+                    if st.get("on") == enabled or st.get("error"):
+                        break
         else:
             marker_name = "on" if enabled else "off"
             marker_path = os.path.join(state_dir, marker_name)
@@ -203,7 +207,15 @@ class Plugin:
                     pass
             except Exception as e:
                 decky.logger.error(f"failed to write marker {marker_name}: {e}")
-            await asyncio.sleep(0.2)
+
+            # poll until daemon processes marker or reports error
+            for _ in range(25):
+                await asyncio.sleep(0.1)
+                st = await self.get_status()
+                if st.get("on") == enabled:
+                    break
+                if enabled and st.get("error"):
+                    break
 
         st = await self.get_status()
         self._set_wifi_low_latency(bool(st.get("on", False)))

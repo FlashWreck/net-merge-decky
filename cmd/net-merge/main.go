@@ -260,7 +260,12 @@ func cmdDaemon(args []string) {
 		statusErr := lastErr
 		if !t.IsOn() {
 			if vpnDev, hasVPN := tun.DetectActiveVPN(); hasVPN {
-				statusErr = fmt.Sprintf("Active VPN detected on %s. Turn off VPN before enabling NetMerge to prevent route conflicts and unencrypted traffic leaks.", vpnDev)
+				if statusErr == "" {
+					statusErr = fmt.Sprintf("Active VPN detected on %s. Turn off VPN before enabling NetMerge to prevent route conflicts and unencrypted traffic leaks.", vpnDev)
+				}
+			} else {
+				lastErr = ""
+				statusErr = ""
 			}
 		}
 		st := state.Status{
@@ -347,6 +352,14 @@ func cmdDaemon(args []string) {
 				bal.SetV6Mode(engine.V6Off)
 			}
 
+			if t.IsOn() {
+				if vpnDev, hasVPN := tun.DetectActiveVPN(); hasVPN {
+					logx.Printf("active VPN detected on %s, turning net-merge off\n", vpnDev)
+					turn(false)
+					lastErr = fmt.Sprintf("Active VPN detected on %s. NetMerge was turned off to prevent route conflicts and unencrypted traffic leaks.", vpnDev)
+				}
+			}
+
 			writeStatus(now)
 		}
 	}
@@ -420,6 +433,11 @@ func cmdRun(args []string) {
 				NICs:         snap,
 			})
 
+			if vpnDev, hasVPN := tun.DetectActiveVPN(); hasVPN {
+				logx.Printf("active VPN detected on %s, stopping\n", vpnDev)
+				goto stop
+			}
+
 			if state.TakeMarker(c.stateDir, "off") || state.TakeMarker(c.stateDir, "quit") {
 				goto stop
 			}
@@ -444,6 +462,7 @@ func cmdControl(name string, args []string) {
 		}
 		die(fmt.Errorf("net-merge is not running; start daemon first"))
 	}
+	markerTime := time.Now()
 	if err := state.SendMarker(*dir, name); err != nil {
 		die(err)
 	}
@@ -464,7 +483,7 @@ func cmdControl(name string, args []string) {
 			}
 			return
 		}
-		if ok && want && !st.On && st.Error != "" {
+		if ok && want && !st.On && st.Error != "" && st.Updated.After(markerTime) {
 			die(fmt.Errorf("%s", st.Error))
 		}
 	}

@@ -3,6 +3,22 @@
 What changed in each release. Each version's section becomes its GitHub release notes, so add the
 entry here before pushing a version tag.
 
+## [Unreleased]
+
+### Added
+- **Linux support**, including NixOS. System-wide mode, the tray icon (any desktop with
+  StatusNotifierItem support: KDE, GNOME with the AppIndicator extension, XFCE, Cinnamon, ...), the
+  SOCKS5 proxy, live per-adapter speeds and autostart (XDG autostart entry) all work. The TUN and
+  its routes are set up over netlink, flows are pinned with `SO_BINDTOIFINDEX`, and adapters are
+  detected from sysfs and the routing tables. Needs root or `CAP_NET_ADMIN` (`setcap`).
+- **Nix flake** with a package and a NixOS module: `programs.net-merge.enable` installs a capability
+  wrapper so the tray runs without root, and `programs.net-merge.autostart` starts it in every
+  graphical session.
+
+### Changed
+- The source is split into packages: `cmd/net-merge` (the command) and `internal/...` (engine, nics,
+  tun, tray, platform, state, icon, logx). Build with `go build ./cmd/net-merge`.
+
 ## [0.1.1] - 2026-10-14
 
 ### Added

@@ -1,3 +1,4 @@
 *.exe
 wintun.dll
 dist/
+result

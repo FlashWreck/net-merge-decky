@@ -51,6 +51,7 @@ interface StatusResponse {
   total_rate_in?: number;
   total_rate_out?: number;
   nics?: SlotStats[];
+  error?: string;
 }
 
 interface SettingsResponse {
@@ -152,6 +153,9 @@ function NetMergeContent() {
     try {
       const res = await setEnabled(val);
       setStatus(res);
+      if (val && !res.on) {
+        setErrorMsg(res.error || "Failed to enable aggregation");
+      }
     } catch (e: unknown) {
       setErrorMsg(getErrorMessage(e, "Error updating status"));
     } finally {
@@ -202,6 +206,9 @@ function NetMergeContent() {
   const totalIn = status?.total_rate_in || 0;
   const totalOut = status?.total_rate_out || 0;
 
+  const vpnBlocked = Boolean(!status?.on && status?.error);
+  const displayError = errorMsg || (vpnBlocked ? status?.error : null);
+
   // status banner
   const statusSection = (
     <PanelSection>
@@ -209,28 +216,32 @@ function NetMergeContent() {
         <ToggleField
           label="Aggregate Connections"
           description={
-            status?.on
+            vpnBlocked
+              ? "VPN Active, Disable VPN to aggregate connections"
+              : status?.on
               ? `Merging ${activeNICs.length} Adapter${activeNICs.length === 1 ? "" : "s"}`
               : "Combine Wi-Fi, Ethernet, and Phone Tethering"
           }
           checked={Boolean(status?.on)}
-          disabled={loading}
+          disabled={loading || vpnBlocked}
           onChange={handleToggle}
         />
       </PanelSectionRow>
 
-      {errorMsg && (
+      {displayError && (
         <PanelSectionRow>
           <div
             style={{
               color: "#ff6b6b",
               fontSize: "12px",
-              padding: "4px 8px",
-              background: "rgba(255,107,107,0.1)",
+              padding: "6px 10px",
+              background: "rgba(255,107,107,0.12)",
+              border: "1px solid rgba(255,107,107,0.25)",
               borderRadius: "4px",
+              lineHeight: "1.4",
             }}
           >
-            {errorMsg}
+            {displayError}
           </div>
         </PanelSectionRow>
       )}

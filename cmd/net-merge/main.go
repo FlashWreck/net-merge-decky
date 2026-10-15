@@ -243,6 +243,7 @@ func cmdDaemon(args []string) {
 	t.MTU = c.mtu
 
 	since := time.Now()
+	var lastErr string
 	writeStatus := func(now time.Time) {
 		snap := sched.Snapshot()
 		var totalIn, totalOut float64
@@ -256,6 +257,12 @@ func cmdDaemon(args []string) {
 		if t.IsOn() {
 			mode = "system-wide"
 		}
+		statusErr := lastErr
+		if !t.IsOn() {
+			if vpnDev, hasVPN := tun.DetectActiveVPN(); hasVPN {
+				statusErr = fmt.Sprintf("Active VPN detected on %s. Turn off VPN before enabling NetMerge to prevent route conflicts and unencrypted traffic leaks.", vpnDev)
+			}
+		}
 		st := state.Status{
 			PID:          os.Getpid(),
 			On:           t.IsOn(),
@@ -267,6 +274,7 @@ func cmdDaemon(args []string) {
 			TotalRateIn:  totalIn,
 			TotalRateOut: totalOut,
 			NICs:         snap,
+			Error:        statusErr,
 		}
 		state.Write(c.stateDir, st)
 	}
@@ -275,12 +283,15 @@ func cmdDaemon(args []string) {
 		if on {
 			if !t.IsOn() {
 				if err := t.On(); err != nil {
+					lastErr = err.Error()
 					logx.Printf("error turning on: %v\n", err)
 				} else {
+					lastErr = ""
 					logx.Printf("net-merge is ON: traffic aggregated across links\n")
 				}
 			}
 		} else {
+			lastErr = ""
 			if t.IsOn() {
 				t.Off()
 				logx.Printf("net-merge is OFF: default routing restored\n")
@@ -453,6 +464,9 @@ func cmdControl(name string, args []string) {
 			}
 			return
 		}
+		if ok && want && !st.On && st.Error != "" {
+			die(fmt.Errorf("%s", st.Error))
+		}
 	}
 	fmt.Printf("Command %q sent to daemon.\n", name)
 }
@@ -486,6 +500,10 @@ func cmdStatus(args []string) {
 		return
 	}
 	if !ok || !st.On {
+		if st != nil && st.Error != "" {
+			fmt.Printf("net-merge is OFF (%s)\n", st.Error)
+			return
+		}
 		fmt.Println("net-merge is OFF (daemon is paused).")
 		return
 	}

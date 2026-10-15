@@ -88,6 +88,10 @@ func (t *Tun) On() (err error) {
 	tunnel.T().SetUDPTimeout(udpSessionTimeout)
 	CleanupStale()
 
+	if vpnDev, hasVPN := DetectActiveVPN(); hasVPN {
+		return fmt.Errorf("active VPN detected on %s. Turn off VPN before enabling NetMerge to prevent route conflicts and unencrypted traffic leaks", vpnDev)
+	}
+
 	dev, err := tun.Open(tunName, uint32(t.MTU))
 	if err != nil {
 		return fmt.Errorf("open TUN (%s): %w", openHint, err)

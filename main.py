@@ -205,8 +205,9 @@ class Plugin:
                 decky.logger.error(f"failed to write marker {marker_name}: {e}")
             await asyncio.sleep(0.2)
 
-        self._set_wifi_low_latency(enabled)
-        return await self.get_status()
+        st = await self.get_status()
+        self._set_wifi_low_latency(bool(st.get("on", False)))
+        return st
 
     async def set_ipv6_mode(self, mode: str) -> dict:
         if mode not in ["auto", "on", "off"]:

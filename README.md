@@ -31,6 +31,18 @@ Every new connection (TCP and UDP, IPv4 and IPv6) is assigned to a physical link
 3. **Egress Binding:** New flows are bound to physical interface source addresses and routed using `SO_BINDTOIFINDEX`, bypassing the TUN to avoid loops.
 4. **Balancing:** Flows are distributed using weighted least-active scheduling according to real-time link throughput.
 
+## VPN Compatibility & Limitations
+
+NetMerge aggregates network connections at the physical link level by binding outgoing sockets directly to physical network adapters (`wlan0`, `eth0`, `usb0`).
+
+- **Incompatible with Active VPNs:** If an active VPN tunnel (such as OpenVPN, WireGuard, Tailscale, Mullvad, or ProtonVPN) holds a default (`0.0.0.0/0`) or slash-one (`0.0.0.0/1`, `128.0.0.0/1`) route, NetMerge automatically refuses to turn on and displays a warning:
+  > *"Active VPN detected on `<interface>`. Turn off VPN before enabling NetMerge to prevent route conflicts and unencrypted traffic leaks."*
+- **Why:** NetMerge captures system traffic via `/1` prefixes. Enabling NetMerge over an active VPN would bypass the encrypted tunnel, leaking unencrypted packets and DNS queries directly over physical adapters, and can destroy existing VPN routes (e.g. OpenVPN `redirect-gateway def1`).
+- **No Planned VPN Support:** Multi-link VPN bonding is **not supported and will not be added for the foreseeable future**. Splitting a single standard VPN tunnel across multiple physical IP addresses causes endpoint flapping and packet rejection without a dedicated remote bonding proxy server.
+
+> [!NOTE]
+> Always pause or disconnect your VPN before enabling NetMerge aggregation. Once NetMerge is turned off, you can re-enable your VPN as normal.
+
 ## Steam Deck Hardware & Kernel Optimizations
 
 NetMerge is purpose-built for SteamOS and the Steam Deck's custom AMD Van Gogh APU:
@@ -86,5 +98,5 @@ NetMerge is released under the MIT License. See `LICENSE` and `THIRD-PARTY-NOTIC
 ## AI Disclosure
 
 This project is AI-assisted.
-- **Agent used:** Antigravity IDE (Gemini 3.8 Flash (High))
+- **Agent used:** Antigravity IDE (Gemini 3.8 Flash (High)) and Claude 
 

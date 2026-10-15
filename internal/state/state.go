@@ -21,6 +21,7 @@ type Status struct {
 	TotalRateIn  float64            `json:"total_rate_in"`
 	TotalRateOut float64            `json:"total_rate_out"`
 	NICs         []engine.SlotStats `json:"nics"`
+	Error        string             `json:"error,omitempty"`
 }
 
 // defaultdir returns active decky runtime state path or user cache fallback

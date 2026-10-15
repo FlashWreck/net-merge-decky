@@ -12,7 +12,7 @@ all: build-backend build-frontend package
 
 build-backend:
 	mkdir -p bin
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/net-merge ./cmd/net-merge
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 go build -ldflags="-s -w" -o bin/net-merge ./cmd/net-merge
 
 build-frontend:
 	pnpm run build

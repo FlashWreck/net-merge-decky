@@ -2,6 +2,7 @@ package nics
 
 import (
 	"net"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -21,6 +22,11 @@ func ForceEgress(idx int, v6 bool) func(network, address string, c syscall.RawCo
 				if ifc, serr = net.InterfaceByIndex(idx); serr == nil {
 					serr = unix.BindToDevice(int(fd), ifc.Name)
 				}
+			}
+			if strings.HasPrefix(network, "tcp") {
+				_ = unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, "bbr")
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
 			}
 		}); err != nil {
 			return err

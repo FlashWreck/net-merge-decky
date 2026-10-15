@@ -2,9 +2,12 @@ package state
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"net-merge/internal/engine"
 )
@@ -24,7 +27,7 @@ type Status struct {
 	Error        string             `json:"error,omitempty"`
 }
 
-// defaultdir returns active decky runtime state path or user cache fallback
+// DefaultDir returns active decky runtime state path or secure runtime fallback
 func DefaultDir() string {
 	if dir := os.Getenv("DECKY_PLUGIN_RUNTIME_DIR"); dir != "" {
 		return filepath.Join(dir, "state")
@@ -33,15 +36,14 @@ func DefaultDir() string {
 	if _, err := os.Stat(deckyRun); err == nil {
 		return deckyRun
 	}
-	tmpRun := "/tmp/net-merge-decky/state"
-	if _, err := os.Stat(tmpRun); err == nil {
-		return tmpRun
+	if os.Geteuid() == 0 {
+		return "/run/net-merge-decky/state"
 	}
 	base, err := os.UserCacheDir()
 	if err != nil {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "net-merge")
+	return filepath.Join(base, fmt.Sprintf("net-merge-%d", os.Getuid()), "state")
 }
 
 func Write(dir string, st Status) {
@@ -50,9 +52,19 @@ func Write(dir string, st Status) {
 		return
 	}
 	tmp := filepath.Join(dir, "status.json.tmp")
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		os.Rename(tmp, filepath.Join(dir, "status.json"))
+	_ = os.Remove(tmp) // Remove pre-existing symlink if present
+
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return
 	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return
+	}
+	f.Close()
+	_ = os.Rename(tmp, filepath.Join(dir, "status.json"))
 }
 
 func Clear(dir string) { os.Remove(filepath.Join(dir, "status.json")) }
@@ -74,7 +86,13 @@ func SendMarker(dir, name string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, name), nil, 0o644)
+	path := filepath.Join(dir, name)
+	_ = os.Remove(path) // Unlink any pre-existing symlink without following
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // takemarker consumes marker file

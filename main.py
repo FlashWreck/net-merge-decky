@@ -5,7 +5,31 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import decky
+
+def _safe_write_marker(path: str):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o644)
+    os.close(fd)
+
+def _safe_save_json(path: str, data: dict):
+    dirname = os.path.dirname(path)
+    os.makedirs(dirname, exist_ok=True)
+    tmp_path = path + ".tmp"
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp_path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, path)
 
 class Plugin:
     def __init__(self):
@@ -56,13 +80,25 @@ class Plugin:
         return os.path.join(plugin_dir, "bin", "net-merge")
 
     def _get_state_dir(self) -> str:
-        runtime_dir = getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", "/tmp/net-merge-decky")
+        runtime_dir = getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", None)
+        if not runtime_dir:
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                runtime_dir = "/run/net-merge-decky"
+            else:
+                uid = os.getuid() if hasattr(os, "getuid") else 0
+                runtime_dir = os.path.join(tempfile.gettempdir(), f"net-merge-decky-{uid}")
         state_dir = os.path.join(runtime_dir, "state")
         os.makedirs(state_dir, exist_ok=True)
         return state_dir
 
     def _get_settings_path(self) -> str:
-        settings_dir = getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", "/tmp/net-merge-decky")
+        settings_dir = getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", None)
+        if not settings_dir:
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                settings_dir = "/run/net-merge-decky/settings"
+            else:
+                uid = os.getuid() if hasattr(os, "getuid") else 0
+                settings_dir = os.path.join(tempfile.gettempdir(), f"net-merge-decky-settings-{uid}")
         os.makedirs(settings_dir, exist_ok=True)
         return os.path.join(settings_dir, "settings.json")
 
@@ -82,8 +118,7 @@ class Plugin:
     def _save_settings_disk(self, s: dict):
         path = self._get_settings_path()
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(s, f, indent=2)
+            _safe_save_json(path, s)
         except Exception as e:
             decky.logger.error(f"failed to save settings: {e}")
 
@@ -143,8 +178,7 @@ class Plugin:
         # send quit marker
         quit_marker = os.path.join(state_dir, "quit")
         try:
-            with open(quit_marker, "w") as f:
-                pass
+            _safe_write_marker(quit_marker)
         except Exception:
             pass
 
@@ -203,8 +237,7 @@ class Plugin:
             marker_name = "on" if enabled else "off"
             marker_path = os.path.join(state_dir, marker_name)
             try:
-                with open(marker_path, "w") as f:
-                    pass
+                _safe_write_marker(marker_path)
             except Exception as e:
                 decky.logger.error(f"failed to write marker {marker_name}: {e}")
 
@@ -231,8 +264,7 @@ class Plugin:
         state_dir = self._get_state_dir()
         marker_path = os.path.join(state_dir, f"ipv6-{mode}")
         try:
-            with open(marker_path, "w") as f:
-                pass
+            _safe_write_marker(marker_path)
         except Exception as e:
             decky.logger.error(f"failed to write marker ipv6-{mode}: {e}")
 

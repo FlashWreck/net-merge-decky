@@ -31,6 +31,15 @@ Every new connection (TCP and UDP, IPv4 and IPv6) is assigned to a physical link
 3. **Egress Binding:** New flows are bound to physical interface source addresses and routed using `SO_BINDTOIFINDEX`, bypassing the TUN to avoid loops.
 4. **Balancing:** Flows are distributed using weighted least-active scheduling according to real-time link throughput.
 
+## Steam Deck Hardware & Kernel Optimizations
+
+NetMerge is purpose-built for SteamOS and the Steam Deck's custom AMD Van Gogh APU:
+
+- **AMD Zen 2 Microarchitecture Vectorization (`GOAMD64=v3`):** Compiled with native AVX2, FMA3, BMI1, and BMI2 vector instructions. Packet handling, memory copies, and userland TCP parsing leverage 256-bit SIMD registers to minimize APU memory bandwidth pressure.
+- **BBR Congestion Control:** Outbound connections use Google's BBR congestion control algorithm (`TCP_CONGESTION="bbr"`). Unlike Cubic, BBR does not slash throughput on transient radio drops, maximizing speeds over Wi-Fi and mobile tethering.
+- **Low-Latency TCP Socket Flags:** Outbound sockets enforce `TCP_NODELAY` to bypass Nagle's algorithm and `TCP_QUICKACK` to eliminate 40 ms delayed-ACK waits during concurrent Steam CDN chunk negotiations.
+- **Dynamic Wi-Fi Power Save Jitter Prevention:** SteamOS enables aggressive 802.11 power saving by default, causing latency to periodically spike from 15 ms to 150+ ms. NetMerge automatically turns Wi-Fi power save off while aggregation is active and restores it when paused or stopped to preserve battery.
+
 ## Development and Build
 
 Prerequisites on Build Machine:
@@ -47,6 +56,13 @@ make all
 
 The compiled plugin package will be created at `out/net-merge-decky.zip`.
 
+### Direct Deployment to Steam Deck
+
+```bash
+# Deploy to Steam Deck over SSH and restart Decky Loader
+make deploy DECK_IP=<your-deck-ip>
+```
+
 ## Manual Installation on Steam Deck
 
 1. Download `net-merge-decky.zip` from Releases.
@@ -56,6 +72,12 @@ The compiled plugin package will be created at `out/net-merge-decky.zip`.
    sudo systemctl restart plugin_loader
    ```
 4. Open the Quick Access Menu (`...` button) in Gaming Mode and open the NetMerge tab.
+
+## Feedback, Testing & Feature Requests
+
+- **Bug Reports:** If an adapter fails to balance or you encounter routing issues, please [open an issue](https://github.com/FlashWreck/net-merge-decky/issues) with your Steam Deck model (LCD/OLED), SteamOS version, and adapter list.
+- **Feature Requests:** Have ideas or features in mind? Please share your suggestions in [GitHub Issues](https://github.com/FlashWreck/net-merge-decky/issues).
+- **Benchmark Reports:** Help us test! If you test multi-link speeds (e.g. Wi-Fi + 5G Tethering or Wi-Fi + Docked Ethernet), share your before/after download speeds and screenshots.
 
 ## License
 

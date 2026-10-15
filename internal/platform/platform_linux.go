@@ -4,11 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"log"
-	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,38 +29,59 @@ func IsAdmin() bool {
 	return os.Geteuid() == 0
 }
 
-// abstract unix socket single instance lock
-const lockAddr = "@net-merge"
+const rootLockPath = "/run/net-merge.lock"
 
-var lock net.Listener
+func fallbackLockPath() string {
+	return filepath.Join(os.TempDir(), "net-merge.lock")
+}
 
-// singleinstance acquires single instance lock
+var lockFile *os.File
+
+// SingleInstance acquires a non-blocking exclusive file lock
 func SingleInstance() bool {
-	ln, err := net.Listen("unix", lockAddr)
-	if err != nil {
+	var f *os.File
+	var err error
+	if os.Geteuid() == 0 {
+		f, err = os.OpenFile(rootLockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	}
+	if f == nil || err != nil {
+		f, err = os.OpenFile(fallbackLockPath(), os.O_CREATE|os.O_RDWR, 0o644)
+		if err != nil {
+			return false
+		}
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		f.Close()
 		return false
 	}
-	lock = ln
-	go func() { // accept and close check connections
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			c.Close()
-		}
-	}()
+	lockFile = f
+	_ = f.Truncate(0)
+	_, _ = f.Seek(0, 0)
+	fmt.Fprintf(f, "%d\n", os.Getpid())
 	return true
 }
 
-// instancerunning checks if daemon holds lock
+// InstanceRunning reports whether the daemon is actively running
 func InstanceRunning() bool {
-	c, err := net.DialTimeout("unix", lockAddr, time.Second)
-	if err != nil {
-		return false
+	checkFile := func(path string) (bool, bool) {
+		f, err := os.Open(path)
+		if err != nil {
+			return false, false
+		}
+		defer f.Close()
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+			return false, true
+		}
+		return true, true
 	}
-	c.Close()
-	return true
+
+	if running, exists := checkFile(rootLockPath); exists {
+		return running
+	}
+	running, _ := checkFile(fallbackLockPath())
+	return running
 }
 
 // redirectstd redirects standard descriptors to file

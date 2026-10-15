@@ -244,6 +244,7 @@ func cmdDaemon(args []string) {
 
 	since := time.Now()
 	var lastErr string
+	var lastErrVPN bool
 	writeStatus := func(now time.Time) {
 		snap := sched.Snapshot()
 		var totalIn, totalOut float64
@@ -263,8 +264,8 @@ func cmdDaemon(args []string) {
 				if statusErr == "" {
 					statusErr = fmt.Sprintf("Active VPN detected on %s. Turn off VPN before enabling NetMerge to prevent route conflicts and unencrypted traffic leaks.", vpnDev)
 				}
-			} else {
-				lastErr = ""
+			} else if lastErrVPN {
+				lastErr, lastErrVPN = "", false
 				statusErr = ""
 			}
 		}
@@ -289,14 +290,17 @@ func cmdDaemon(args []string) {
 			if !t.IsOn() {
 				if err := t.On(); err != nil {
 					lastErr = err.Error()
+					lastErrVPN = strings.Contains(strings.ToLower(err.Error()), "vpn")
 					logx.Printf("error turning on: %v\n", err)
 				} else {
 					lastErr = ""
+					lastErrVPN = false
 					logx.Printf("net-merge is ON: traffic aggregated across links\n")
 				}
 			}
 		} else {
 			lastErr = ""
+			lastErrVPN = false
 			if t.IsOn() {
 				t.Off()
 				logx.Printf("net-merge is OFF: default routing restored\n")
@@ -357,6 +361,7 @@ func cmdDaemon(args []string) {
 					logx.Printf("active VPN detected on %s, turning net-merge off\n", vpnDev)
 					turn(false)
 					lastErr = fmt.Sprintf("Active VPN detected on %s. NetMerge was turned off to prevent route conflicts and unencrypted traffic leaks.", vpnDev)
+					lastErrVPN = true
 				}
 			}
 

@@ -1,6 +1,6 @@
 {
   "name": "net-merge-decky",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Network adapter aggregation plugin for Steam Deck",
   "type": "module",
   "scripts": {

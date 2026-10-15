@@ -20,6 +20,37 @@ class Plugin:
             "include": ""
         }
 
+    def _get_wifi_interfaces(self) -> list:
+        # find active wireless interfaces
+        interfaces = []
+        try:
+            res = subprocess.run(["iw", "dev"], capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith("Interface "):
+                        interfaces.append(line.split()[1])
+        except Exception:
+            pass
+        if not interfaces and os.path.exists("/sys/class/net/wlan0"):
+            interfaces.append("wlan0")
+        return interfaces
+
+    def _set_wifi_low_latency(self, active: bool):
+        # toggle wifi power save to prevent latency jitter
+        state = "off" if active else "on"
+        for iface in self._get_wifi_interfaces():
+            try:
+                subprocess.run(
+                    ["iw", "dev", iface, "set", "power_save", state],
+                    capture_output=True,
+                    check=False,
+                    timeout=2
+                )
+                decky.logger.info(f"set wifi power_save {state} on {iface}")
+            except Exception as e:
+                decky.logger.error(f"failed to set wifi power_save on {iface}: {e}")
+
     def _get_bin_path(self) -> str:
         plugin_dir = getattr(decky, "DECKY_PLUGIN_DIR", os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(plugin_dir, "bin", "net-merge")
@@ -174,6 +205,7 @@ class Plugin:
                 decky.logger.error(f"failed to write marker {marker_name}: {e}")
             await asyncio.sleep(0.2)
 
+        self._set_wifi_low_latency(enabled)
         return await self.get_status()
 
     async def set_ipv6_mode(self, mode: str) -> dict:
@@ -216,6 +248,7 @@ class Plugin:
         return {"usable": [], "skipped": []}
 
     async def cleanup_routes(self) -> bool:
+        self._set_wifi_low_latency(False)
         bin_path = self._get_bin_path()
         if not os.path.exists(bin_path):
             return False
@@ -279,13 +312,16 @@ class Plugin:
         # auto-start daemon if configured
         if settings.get("enabled_on_boot", False):
             await self._start_daemon(start_on=True)
+            self._set_wifi_low_latency(True)
 
     async def _unload(self):
         decky.logger.info("net-merge plugin backend unloading")
+        self._set_wifi_low_latency(False)
         if self.sleep_task:
             self.sleep_task.cancel()
         await self._stop_daemon()
 
     async def _uninstall(self):
         decky.logger.info("net-merge plugin backend uninstalling")
+        self._set_wifi_low_latency(False)
         await self.cleanup_routes()

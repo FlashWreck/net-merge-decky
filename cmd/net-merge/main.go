@@ -503,6 +503,9 @@ func cmdStatus(args []string) {
 
 	st, ok := state.Read(*dir)
 	running := platform.InstanceRunning()
+	if !running && ok && st != nil && st.PID > 0 {
+		running = platform.IsPIDRunning(st.PID)
+	}
 
 	if *jsonOut {
 		if !running || !ok {

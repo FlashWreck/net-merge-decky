@@ -29,23 +29,33 @@ func IsAdmin() bool {
 	return os.Geteuid() == 0
 }
 
-const rootLockPath = "/run/net-merge.lock"
+const (
+	rootLockPath = "/run/net-merge.lock"
+	rootPidPath  = "/run/net-merge.pid"
+)
 
 func fallbackLockPath() string {
 	return filepath.Join(os.TempDir(), "net-merge.lock")
 }
 
+func fallbackPidPath() string {
+	return filepath.Join(os.TempDir(), "net-merge.pid")
+}
+
 var lockFile *os.File
 
-// SingleInstance acquires a non-blocking exclusive file lock
 func SingleInstance() bool {
 	var f *os.File
 	var err error
-	if os.Geteuid() == 0 {
-		f, err = os.OpenFile(rootLockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	isRoot := os.Geteuid() == 0
+	if isRoot {
+		f, err = os.OpenFile(rootLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err == nil {
+			_ = os.Chmod(rootLockPath, 0o600)
+		}
 	}
 	if f == nil || err != nil {
-		f, err = os.OpenFile(fallbackLockPath(), os.O_CREATE|os.O_RDWR, 0o644)
+		f, err = os.OpenFile(fallbackLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
 			return false
 		}
@@ -58,12 +68,34 @@ func SingleInstance() bool {
 	_ = f.Truncate(0)
 	_, _ = f.Seek(0, 0)
 	fmt.Fprintf(f, "%d\n", os.Getpid())
+
+	pidBytes := []byte(strconv.Itoa(os.Getpid()) + "\n")
+	pidPath := fallbackPidPath()
+	if isRoot {
+		pidPath = rootPidPath
+	}
+	_ = os.WriteFile(pidPath, pidBytes, 0o644)
 	return true
+}
+
+func IsPIDRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	if err := unix.Kill(pid, 0); err != nil {
+		return false
+	}
+	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return false
+	}
+	name := strings.TrimSpace(string(comm))
+	return name == "net-merge" || strings.HasPrefix(name, "net-merge")
 }
 
 // InstanceRunning reports whether the daemon is actively running
 func InstanceRunning() bool {
-	checkFile := func(path string) (bool, bool) {
+	checkLock := func(path string) (bool, bool) {
 		f, err := os.Open(path)
 		if err != nil {
 			return false, false
@@ -77,11 +109,30 @@ func InstanceRunning() bool {
 		return true, true
 	}
 
-	if running, exists := checkFile(rootLockPath); exists {
+	if running, accessible := checkLock(rootLockPath); accessible {
 		return running
 	}
-	running, _ := checkFile(fallbackLockPath())
-	return running
+
+	checkPID := func(path string) bool {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return false
+		}
+		return IsPIDRunning(pid)
+	}
+
+	if checkPID(rootPidPath) {
+		return true
+	}
+
+	if running, accessible := checkLock(fallbackLockPath()); accessible {
+		return running
+	}
+	return checkPID(fallbackPidPath())
 }
 
 // redirectstd redirects standard descriptors to file

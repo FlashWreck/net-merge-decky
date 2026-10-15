@@ -15,6 +15,7 @@ func TestSingleInstanceAndRunning(t *testing.T) {
 			lockFile.Close()
 			lockFile = nil
 			os.Remove(fallbackLockPath())
+			os.Remove(fallbackPidPath())
 		}
 	}()
 

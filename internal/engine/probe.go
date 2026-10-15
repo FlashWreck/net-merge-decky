@@ -7,7 +7,7 @@ import (
 	"net-merge/internal/nics"
 )
 
-// Internet reachability probes: a TCP connect to a well-known anycast IP, bound to the NIC.
+// reachability probe targets
 var probeTargets = [2][]string{
 	Fam4: {"1.1.1.1:443", "8.8.8.8:443"},
 	Fam6: {"[2606:4700:4700::1111]:443", "[2001:4860:4860::8888]:443"},
@@ -43,10 +43,7 @@ type probeJob struct {
 	f  Family
 }
 
-// RunProbes checks every adapter's internet access per address family: new ones immediately,
-// healthy ones occasionally, dead ones more often so they rejoin quickly. A tether with no data
-// or a captive-portal Wi-Fi therefore never receives flows, and a recovered link is used again
-// within seconds. Runs until stop is closed (nil = forever).
+// runprobes checks internet access per adapter and family
 func (s *Scheduler) RunProbes(stop <-chan struct{}) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -65,7 +62,7 @@ func (s *Scheduler) RunProbes(stop <-chan struct{}) {
 	}
 }
 
-// probeDue returns the (slot, family) pairs that need a probe now and marks them in flight.
+// probedue returns links due for health verification
 func (s *Scheduler) probeDue() []probeJob {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,21 +73,21 @@ func (s *Scheduler) probeDue() []probeJob {
 			continue
 		}
 		for _, f := range []Family{Fam4, Fam6} {
-			if sl.ip(f) == nil || sl.probing[f].Load() {
+			if sl.ip(f) == nil {
 				continue
 			}
-			every := probeEveryUp
-			switch sl.state[f] {
-			case stateUnknown:
-				every = 0
-			case stateDown:
-				every = probeEveryDown
+			interval := probeEveryUp
+			if sl.state[f] != stateUp {
+				interval = probeEveryDown
 			}
-			if now.Sub(sl.lastProbe[f]) >= every {
-				sl.lastProbe[f] = now
-				sl.probing[f].Store(true)
-				due = append(due, probeJob{sl, f})
+			if now.Sub(sl.lastProbe[f]) < interval {
+				continue
 			}
+			if sl.probing[f].Swap(true) {
+				continue
+			}
+			sl.lastProbe[f] = now
+			due = append(due, probeJob{sl: sl, f: f})
 		}
 	}
 	return due

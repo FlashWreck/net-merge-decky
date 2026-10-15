@@ -1,4 +1,6 @@
-*.exe
-wintun.dll
 dist/
-result
+node_modules/
+bin/
+out/
+__pycache__/
+*.pyc

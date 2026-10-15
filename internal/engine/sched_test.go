@@ -98,21 +98,21 @@ func TestProbeStateTiers(t *testing.T) {
 	a, b, c := s.slots[0], s.slots[1], s.slots[2]
 	s.SetState(a, Fam4, true)
 	s.SetState(c, Fam4, false)
-	// A is up, B is unprobed, C is dead: only A gets flows while it is the best tier.
+	// best tier gets all flows
 	for i := 0; i < 5; i++ {
 		if got := s.Acquire(nil); got != a {
 			t.Fatalf("flow %d went to %s, want the probed-up NIC", i, got.Name)
 		}
 	}
-	s.SetState(a, Fam4, false) // now B (unknown) beats the two dead ones
+	s.SetState(a, Fam4, false) // unprobed preferred over dead
 	if got := s.Acquire(nil); got != b {
 		t.Fatalf("want unprobed NIC over dead ones, got %s", got.Name)
 	}
-	s.SetState(b, Fam4, false) // everything dead: still serve, never an outage
+	s.SetState(b, Fam4, false) // fallback when all links fail
 	if s.Acquire(nil) == nil {
 		t.Fatal("all-dead must still hand out a NIC")
 	}
-	s.SetState(c, Fam4, true) // a recovered NIC takes over immediately
+	s.SetState(c, Fam4, true) // recovered link takes over
 	if got := s.Acquire(nil); got != c {
 		t.Fatalf("recovered NIC should win, got %s", got.Name)
 	}
@@ -174,7 +174,7 @@ func TestV6StateIsIndependentOfV4(t *testing.T) {
 	a, b := s.slots[0], s.slots[1]
 	s.SetState(a, Fam4, true)
 	s.SetState(b, Fam4, true)
-	s.SetState(a, Fam6, false) // A has working v4 but its v6 is dead
+	s.SetState(a, Fam6, false) // v4 working but v6 failed
 	s.SetState(b, Fam6, true)
 	for i := 0; i < 4; i++ {
 		got := s.AcquireFor(Fam6, nil)
@@ -192,8 +192,7 @@ func TestV6StateIsIndependentOfV4(t *testing.T) {
 	}
 }
 
-// A hotspot that is fast over native IPv6 but slow over translated IPv4 must be weighted per
-// family: nearly starved for v4 flows, fully used for v6 flows.
+// auto weights calculated per family
 func TestAutoWeightsArePerFamily(t *testing.T) {
 	a := nic("A", "10.0.0.1", 1)
 	a.IP6 = net.ParseIP("2001:db8::1")
@@ -202,8 +201,8 @@ func TestAutoWeightsArePerFamily(t *testing.T) {
 	s := NewScheduler([]nics.Nic{a, b})
 	s.SetAuto(true)
 	sa, sb := s.slots[0], s.slots[1]
-	const mbit = 125_000 // bytes/s
-	// v4: A 100 Mbit/s, B 5 Mbit/s.  v6: both 100 Mbit/s.
+	const mbit = 125_000 // bytes per sec
+	// simulate 100 mbit vs 5 mbit
 	for i := 0; i < 3; i++ {
 		sa.bytesIn[Fam4].Add(100 * mbit)
 		sb.bytesIn[Fam4].Add(5 * mbit)
@@ -217,7 +216,7 @@ func TestAutoWeightsArePerFamily(t *testing.T) {
 	if got := sb.weight[Fam6] / sa.weight[Fam6]; got < 0.95 {
 		t.Fatalf("fast v6 path must keep full weight, got ratio %.2f", got)
 	}
-	// And the peak is remembered while idle (no traffic for a while).
+	// peak capacity retained while idle
 	for i := 0; i < 20; i++ {
 		s.Tick(time.Second)
 	}
@@ -226,13 +225,13 @@ func TestAutoWeightsArePerFamily(t *testing.T) {
 	}
 }
 
-// A NIC whose estimate was poisoned by one bad moment must not stay starved forever.
+// weights recover after temporary drop
 func TestPessimisticEstimateRecoversWhileIdle(t *testing.T) {
 	s := NewScheduler([]nics.Nic{nic("A", "10.0.0.1", 1), nic("B", "10.0.0.2", 1)})
 	s.SetAuto(true)
 	sa, sb := s.slots[0], s.slots[1]
 	const mbit = 125_000
-	for i := 0; i < 3; i++ { // B looks 20x slower than A
+	for i := 0; i < 3; i++ { // simulate slow link
 		sa.bytesIn[Fam4].Add(100 * mbit)
 		sb.bytesIn[Fam4].Add(5 * mbit)
 		s.Tick(time.Second)
@@ -240,7 +239,7 @@ func TestPessimisticEstimateRecoversWhileIdle(t *testing.T) {
 	if w := sb.weight[Fam4] / sa.weight[Fam4]; w > 0.06 {
 		t.Fatalf("setup: B should be down-weighted, ratio %.2f", w)
 	}
-	for i := 0; i < 80; i++ { // then nobody uses B, and A keeps working
+	for i := 0; i < 80; i++ { // idle link recovery
 		sa.bytesIn[Fam4].Add(100 * mbit)
 		s.Tick(time.Second)
 	}
@@ -252,7 +251,7 @@ func TestPessimisticEstimateRecoversWhileIdle(t *testing.T) {
 func TestV6CoverageDecidesWhetherIPv6IsBalanced(t *testing.T) {
 	a := nic("A", "10.0.0.1", 1)
 	a.IP6 = net.ParseIP("2001:db8::1")
-	b := nic("B", "10.0.0.2", 1) // IPv4 only
+	b := nic("B", "10.0.0.2", 1) // ipv4 only
 	s := NewScheduler([]nics.Nic{a, b})
 	if s.V6CoversAll() {
 		t.Fatal("B has no IPv6: IPv6 would funnel onto A, coverage must be partial")
@@ -265,7 +264,7 @@ func TestV6CoverageDecidesWhetherIPv6IsBalanced(t *testing.T) {
 	if !s.V6CoversAll() {
 		t.Fatal("every adapter has IPv6 now")
 	}
-	s.SetState(s.slots[1], Fam6, false) // B's IPv6 probe fails
+	s.SetState(s.slots[1], Fam6, false) // v6 probe failed
 	if s.V6CoversAll() {
 		t.Fatal("a dead IPv6 path on B means partial coverage again")
 	}

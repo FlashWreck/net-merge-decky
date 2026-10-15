@@ -9,8 +9,7 @@ import (
 	"net-merge/internal/nics"
 )
 
-// slotConn counts a pinned TCP flow's bytes and releases its slot on Close. It exposes
-// CloseRead/CloseWrite because the TUN relay half-closes each direction separately.
+// slotconn tracks flow metrics and releases slot on close
 type slotConn struct {
 	*net.TCPConn
 	sl   *Slot
@@ -31,16 +30,14 @@ func (c *slotConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// release frees the slot's balancing count. It happens at the first half-close, not at the final
-// Close: the relay can keep a finished flow open for up to a minute waiting for the peer's FIN,
-// and counting those as active would steer new flows away from the NIC that just finished.
+// release decrements balancing count on first half close
 func (c *slotConn) release() { c.once.Do(func() { c.s.ReleaseFor(c.sl, c.fam) }) }
 
 func (c *slotConn) CloseRead() error  { c.release(); return c.TCPConn.CloseRead() }
 func (c *slotConn) CloseWrite() error { c.release(); return c.TCPConn.CloseWrite() }
 func (c *slotConn) Close() error      { c.release(); return c.TCPConn.Close() }
 
-// DialPinned is DialTCP for front-ends that hand the conn to someone else to pump.
+// dialpinned dials tcp flow wrapped in slotconn
 func (b *Balancer) DialPinned(ctx context.Context, host string, port int) (net.Conn, error) {
 	c, sl, f, err := b.DialTCP(ctx, host, port)
 	if err != nil {
@@ -67,9 +64,7 @@ func (c *slotPacketConn) WriteTo(p []byte, a net.Addr) (int, error) {
 	return n, err
 }
 
-// ListenUDP opens a UDP socket pinned to one NIC (a UDP "flow" = the socket, so every datagram
-// of that flow leaves the same way). UDP flows are short and numerous (DNS), so they don't hold
-// a balancing slot: the pick still spreads them via the scheduler's tie-breaking.
+// listenudp opens udp socket pinned to selected adapter
 func (b *Balancer) ListenUDP(ctx context.Context, f Family) (net.PacketConn, error) {
 	network := "udp4"
 	if f == Fam6 {

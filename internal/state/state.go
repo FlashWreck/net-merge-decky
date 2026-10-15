@@ -9,20 +9,33 @@ import (
 	"net-merge/internal/engine"
 )
 
-// The elevated process can't be signalled from a normal shell, so control goes through files in
-// a per-user directory: status.json (written once a second while on) and marker files
-// ("on", "off", "quit") that the running instance consumes.
-
+// status and control markers are managed through files in state directory
 type Status struct {
-	PID     int
-	Mode    string
-	V6      string
-	Since   time.Time
-	Updated time.Time
-	NICs    []engine.SlotStats
+	PID          int                `json:"pid"`
+	On           bool               `json:"on"`
+	Mode         string             `json:"mode"`
+	V6           string             `json:"v6"`
+	V6Mode       string             `json:"v6_mode"`
+	Since        time.Time          `json:"since"`
+	Updated      time.Time          `json:"updated"`
+	TotalRateIn  float64            `json:"total_rate_in"`
+	TotalRateOut float64            `json:"total_rate_out"`
+	NICs         []engine.SlotStats `json:"nics"`
 }
 
+// defaultdir returns active decky runtime state path or user cache fallback
 func DefaultDir() string {
+	if dir := os.Getenv("DECKY_PLUGIN_RUNTIME_DIR"); dir != "" {
+		return filepath.Join(dir, "state")
+	}
+	deckyRun := "/run/decky/runtime/net-merge-decky/state"
+	if _, err := os.Stat(deckyRun); err == nil {
+		return deckyRun
+	}
+	tmpRun := "/tmp/net-merge-decky/state"
+	if _, err := os.Stat(tmpRun); err == nil {
+		return tmpRun
+	}
 	base, err := os.UserCacheDir()
 	if err != nil {
 		base = os.TempDir()
@@ -43,7 +56,7 @@ func Write(dir string, st Status) {
 
 func Clear(dir string) { os.Remove(filepath.Join(dir, "status.json")) }
 
-// Read returns the status only if it is fresh, i.e. a live process is writing it.
+// read returns status if written recently
 func Read(dir string) (*Status, bool) {
 	b, err := os.ReadFile(filepath.Join(dir, "status.json"))
 	if err != nil {
@@ -63,5 +76,5 @@ func SendMarker(dir, name string) error {
 	return os.WriteFile(filepath.Join(dir, name), nil, 0o644)
 }
 
-// TakeMarker consumes a marker, reporting whether it was there.
+// takemarker consumes marker file
 func TakeMarker(dir, name string) bool { return os.Remove(filepath.Join(dir, name)) == nil }

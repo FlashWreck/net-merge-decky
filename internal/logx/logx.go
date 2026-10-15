@@ -1,4 +1,4 @@
-// Package logx is net-merge's console/log-file output, shared by every package.
+// package logx provides logger output
 package logx
 
 import (
@@ -9,7 +9,7 @@ import (
 
 var out io.Writer = os.Stdout
 
-// SetOutput sends all further output to w (the -log file).
+// setoutput redirects log output to writer
 func SetOutput(w io.Writer) { out = w }
 
 func Printf(format string, a ...any) { fmt.Fprintf(out, format, a...) }

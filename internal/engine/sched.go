@@ -11,9 +11,7 @@ import (
 	"net-merge/internal/nics"
 )
 
-// Family selects which address of a NIC a flow is pinned to. Load, speed and health are tracked
-// per family because one link can behave very differently over each (e.g. a carrier hotspot that
-// is fast over native IPv6 and slow over translated IPv4).
+// family selects address family for flow pinning
 type Family int
 
 const (
@@ -21,8 +19,7 @@ const (
 	Fam6
 )
 
-// linkState is the result of the internet probe: new adapters are "unknown" (still preferred
-// over dead ones, so a probe that can't run never causes an outage) until the first probe lands.
+// link state from probes
 type linkState int
 
 const (
@@ -37,29 +34,29 @@ func (l linkState) String() string {
 
 type slotAddr struct{ ip4, ip6 net.IP }
 
-// Slot is a NIC plus its live counters. Counters are atomic so the data path never takes a lock.
+// slot wraps adapter with atomic traffic counters
 type Slot struct {
 	Name  string
 	Index int
 	key   string
 	addr  atomic.Pointer[slotAddr]
 
-	active, total, failed atomic.Int64 // active is across families (idle check on removal)
+	active, total, failed atomic.Int64 // active across families
 	actF                  [2]atomic.Int64
 	bytesIn, bytesOut     [2]atomic.Int64
 	probing               [2]atomic.Bool
 
-	// guarded by Scheduler.mu
+	// guarded by mu
 	weight          [2]float64
 	present         bool
 	state           [2]linkState
 	lastProbe       [2]time.Time
 	downUntil       [2]time.Time
 	lastIn, lastOut [2]int64
-	rateIn, rateOut [2]float64 // bytes/s over the last tick
-	peak            [2]float64 // observed capacity: max recent rateIn+rateOut
+	rateIn, rateOut [2]float64 // bytes per sec
+	peak            [2]float64 // observed peak capacity
 
-	// The adapter's total traffic from the OS's counters (all apps, not only net-merge's flows).
+	// total link traffic from os counters
 	linkIn, linkOut         uint64
 	linkRateIn, linkRateOut float64
 	linkPrimed              bool
@@ -74,24 +71,28 @@ func (sl *Slot) ip(f Family) net.IP {
 }
 
 type SlotStats struct {
-	Name              string
-	IP                string
-	IP6               string
-	State             string // IPv4 probe state, "-" if the adapter has no IPv4
-	State6            string
-	Weight, Weight6   float64
-	Present           bool
-	Active, Total     int64
-	Failed            int64
-	BytesIn, BytesOut int64
-	RateIn, RateOut   float64 // through net-merge, both families summed (bytes/s)
-	LinkIn, LinkOut   float64 // through the adapter by any app, from the OS's counters (bytes/s)
-	Peak, Peak6       float64
+	Name              string  `json:"name"`
+	IP                string  `json:"ip"`
+	IP6               string  `json:"ip6"`
+	State             string  `json:"state"` // ipv4 probe state
+	State6            string  `json:"state6"`
+	Weight            float64 `json:"weight"`
+	Weight6           float64 `json:"weight6"`
+	Present           bool    `json:"present"`
+	Active            int64   `json:"active"`
+	Total             int64   `json:"total"`
+	Failed            int64   `json:"failed"`
+	BytesIn           int64   `json:"bytes_in"`
+	BytesOut          int64   `json:"bytes_out"`
+	RateIn            float64 `json:"rate_in"` // aggregated throughput
+	RateOut           float64 `json:"rate_out"`
+	LinkIn            float64 `json:"link_in"` // os interface traffic
+	LinkOut           float64 `json:"link_out"`
+	Peak              float64 `json:"peak"`
+	Peak6             float64 `json:"peak6"`
 }
 
-// Scheduler is weighted least-active-flows, per address family: each new flow goes to the NIC
-// with the lowest (active + 1) / weight among those that have an address of that family. Only
-// new flows take the lock.
+// scheduler assigns new flows using weighted least active flows
 type Scheduler struct {
 	mu    sync.Mutex
 	slots []*Slot
@@ -105,7 +106,7 @@ func NewScheduler(nics []nics.Nic) *Scheduler {
 	return s
 }
 
-// SetAuto makes Tick derive weights from observed throughput instead of the static ones.
+// set auto weight derivation from throughput
 func (s *Scheduler) SetAuto(on bool) {
 	s.mu.Lock()
 	s.auto = on
@@ -123,9 +124,7 @@ func normAddr(n nics.Nic) *slotAddr {
 	return a
 }
 
-// Update applies a re-scan: keeps counters of known NICs, picks up changed addresses (DHCP
-// renewal, a new IPv6 prefix), adds new ones (a tether plugged in later), and drops vanished
-// ones once their last flow ends. Adapters are keyed by name.
+// update applies rescan and preserves counters
 func (s *Scheduler) Update(nics []nics.Nic) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -153,7 +152,7 @@ func (s *Scheduler) Update(nics []nics.Nic) {
 		}
 		old := found.addr.Load()
 		if !old.ip4.Equal(na.ip4) {
-			found.state[Fam4] = stateUnknown // new address: re-verify
+			found.state[Fam4] = stateUnknown // reverify on address change
 		}
 		if !old.ip6.Equal(na.ip6) {
 			found.state[Fam6] = stateUnknown
@@ -171,14 +170,10 @@ func (s *Scheduler) Update(nics []nics.Nic) {
 	s.slots = kept
 }
 
-// A NIC counts as measured once it has carried this much (bytes/s, about 0.4 Mbit/s).
+// min throughput threshold for measurement
 const minMeasuredPeak = 50_000
 
-// Tick samples throughput per family. With auto on, a family's weights follow each NIC's
-// observed peak for that family (floored at 0.05, so a slow path still sees an occasional flow
-// and is re-measured). Until every NIC with that family has been measured the weights stay
-// equal, which spreads load so each one gets measured. The peak holds while a NIC is idle and
-// only decays when it is in use but underperforming, so capacity is remembered across pauses.
+// tick samples throughput per family and adjusts weights
 func (s *Scheduler) Tick(dt time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -189,7 +184,7 @@ func (s *Scheduler) Tick(dt time.Duration) {
 			sl.linkRateIn, sl.linkRateOut, sl.linkPrimed = 0, 0, false
 			continue
 		}
-		if sl.linkPrimed && in >= sl.linkIn && out >= sl.linkOut { // counters can reset when an adapter reconnects
+		if sl.linkPrimed && in >= sl.linkIn && out >= sl.linkOut { // handle counter resets
 			sl.linkRateIn = float64(in-sl.linkIn) / sec
 			sl.linkRateOut = float64(out-sl.linkOut) / sec
 		}
@@ -216,9 +211,7 @@ func (s *Scheduler) Tick(dt time.Duration) {
 			live++
 			maxPeak = math.Max(maxPeak, sl.peak[f])
 		}
-		// An idle NIC's old estimate may be stale or pessimistic (it was measured during a bad
-		// moment and then starved of flows, so it could never correct itself). Let it drift back
-		// up, capped at half of the best NIC, so it keeps getting a fair chance to be re-measured.
+		// decay idle link weights back towards capacity
 		for sl := range idle {
 			if sl.present && sl.ip(f) != nil && sl.peak[f] > 0 {
 				sl.peak[f] = math.Min(sl.peak[f]*1.03, math.Max(sl.peak[f], 0.5*maxPeak))
@@ -245,18 +238,16 @@ func (s *Scheduler) Tick(dt time.Duration) {
 	}
 }
 
-// Acquire picks an IPv4 NIC for a new flow, skipping the ones in skip. The caller must Release it.
+// acquire picks ipv4 link for new flow
 func (s *Scheduler) Acquire(skip map[string]struct{}) *Slot { return s.AcquireFor(Fam4, skip) }
 func (s *Scheduler) Release(sl *Slot)                       { s.ReleaseFor(sl, Fam4) }
 
-// AcquireFor picks a NIC that has an address of the given family.
+// acquirefor picks link matching address family
 func (s *Scheduler) AcquireFor(f Family, skip map[string]struct{}) *Slot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	// Tiers: 0 = probed up, 1 = not probed yet, 2 = probe failed or link error cooldown.
-	// Only the best non-empty tier is used, so a dead tether gets no flows but, if every NIC
-	// looks dead, flows still go somewhere rather than nowhere.
+	// tiers prioritize probed links before unprobed or failing links
 	var tiers [3][]*Slot
 	for _, sl := range s.slots {
 		if !sl.present || sl.ip(f) == nil {
@@ -284,8 +275,7 @@ func (s *Scheduler) AcquireFor(f Family, skip map[string]struct{}) *Slot {
 	if len(pool) == 0 {
 		return nil
 	}
-	// Random start so ties don't resonate with the arrival pattern (a rotating counter can
-	// lock onto e.g. "every third flow is a short DNS-like one" and starve an adapter).
+	// random offset prevents synchronization on ties
 	start := rand.IntN(len(pool))
 	var best *Slot
 	bestScore := math.Inf(1)
@@ -301,7 +291,7 @@ func (s *Scheduler) AcquireFor(f Family, skip map[string]struct{}) *Slot {
 	return best
 }
 
-// V6Usable reports whether any adapter can currently carry IPv6.
+// v6usable checks if any link supports ipv6
 func (s *Scheduler) V6Usable() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,9 +303,7 @@ func (s *Scheduler) V6Usable() bool {
 	return false
 }
 
-// V6CoversAll reports whether every adapter that can carry IPv4 can also carry IPv6, i.e. whether
-// balancing IPv6 flows would use the same set of adapters as IPv4 does. If not, IPv6 would funnel
-// everything onto the adapters that have it.
+// v6coversall checks if all links support ipv6
 func (s *Scheduler) V6CoversAll() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -340,7 +328,7 @@ func (s *Scheduler) ReleaseFor(sl *Slot, f Family) {
 	sl.actF[f].Add(-1)
 }
 
-// SetState records a probe result. A passing probe also clears any link-error cooldown.
+// setstate updates probe state
 func (s *Scheduler) SetState(sl *Slot, f Family, up bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -352,7 +340,7 @@ func (s *Scheduler) SetState(sl *Slot, f Family, up bool) {
 	}
 }
 
-// Fail sidelines a NIC whose link itself is broken (for one address family).
+// fail records link error cooldown
 func (s *Scheduler) Fail(sl *Slot, f Family, cooldown time.Duration) {
 	s.mu.Lock()
 	sl.downUntil[f] = s.now().Add(cooldown)

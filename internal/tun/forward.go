@@ -14,23 +14,20 @@ import (
 	"github.com/xjasonlyu/tun2socks/v2/tunnel"
 )
 
-// installForwarders replaces tun2socks' TCP/UDP handlers with equivalents that can refuse IPv6
-// flows. The refusal has to happen at the SYN (RST before the handshake completes): once the
-// userland stack has accepted the connection the app believes it is connected, and a browser
-// that "won" the race on IPv6 will not fall back to IPv4 after a later reset.
+// installforwarders configures tcp and udp handlers with ipv6 filtering
 func installForwarders(s *stack.Stack, allowV6 func() bool) {
 	isV6 := func(id stack.TransportEndpointID) bool { return id.LocalAddress.Len() == header.IPv6AddressSize }
 
 	tf := tcp.NewForwarder(s, 0, 2<<10, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
 		if isV6(id) && !allowV6() {
-			r.Complete(true) // RST: connect fails instantly, Happy Eyeballs moves on to IPv4
+			r.Complete(true) // rst resets connection for ipv4 fallback
 			return
 		}
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
-			r.Complete(true) // prevent a half-open connection leak
+			r.Complete(true) // clean up failed endpoint
 			return
 		}
 		defer r.Complete(false)
@@ -42,7 +39,7 @@ func installForwarders(s *stack.Stack, allowV6 func() bool) {
 	uf := udp.NewForwarder(s, func(r *udp.ForwarderRequest) bool {
 		id := r.ID()
 		if isV6(id) && !allowV6() {
-			return false // unhandled: the stack answers ICMP port unreachable, so QUIC falls back fast
+			return false // icmp unreachable for udp fallback
 		}
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
@@ -69,7 +66,7 @@ type udpConn struct {
 
 func (c *udpConn) ID() stack.TransportEndpointID { return c.id }
 
-// setTCPOptions mirrors tun2socks' defaults: keepalive plus the stack's default buffer sizes.
+// settcpoptions configures socket keepalive and buffers
 func setTCPOptions(s *stack.Stack, ep tcpip.Endpoint) {
 	ep.SocketOptions().SetKeepAlive(true)
 	idle := tcpip.KeepaliveIdleOption(60 * time.Second)

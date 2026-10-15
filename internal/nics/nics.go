@@ -7,25 +7,25 @@ import (
 	"strings"
 )
 
-// Nic is one physical adapter with the source addresses flows are pinned to: its IPv4 address
-// and/or its global IPv6 address (either may be nil).
+// nic represents a physical network adapter
 type Nic struct {
-	Name   string
-	Index  int // interface index, used to force egress (IP_UNICAST_IF); 0 = don't force
-	IP     net.IP
-	IP6    net.IP
-	Weight float64
+	Name   string  `json:"name"`
+	Index  int     `json:"index"` // interface index for socket routing
+	IP     net.IP  `json:"ip"`
+	IP6    net.IP  `json:"ip6"`
+	Weight float64 `json:"weight"`
 }
 
-// Skip is an adapter that was seen but not used, with the reason (shown by `net-merge list`).
-type Skip struct{ Name, Reason string }
+// skip represents an excluded adapter and reason
+type Skip struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
 
-// Second line of defence after the adapter type check: virtual adapters that report as plain
-// Ethernet (virtual switches, VPN TAP drivers, VM host-only adapters, container bridges), matched
-// by name or driver description. The anchored names are Linux interface naming conventions.
+// virtual regex matches software bridges and vpn tunnels
 var (
-	virtualName = regexp.MustCompile(`(?i)loopback|vethernet|wsl|tailscale|zerotier|wintun|net-merge|docker|podman|^veth|^virbr|^br-|^vboxnet|^vmnet|^vnet\d|^lxc|^lxdbr|^cni|^flannel|^wg\d|^tun\d|^tap\d|^zt`)
-	virtualDesc = regexp.MustCompile(`(?i)virtual|vpn|\btap\b|tap-|tunnel|wintun|wireguard|tailscale|zerotier|openvpn|anyconnect|fortinet|vmware|npcap|miniport|teredo|isatap|6to4|pseudo`)
+	virtualName = regexp.MustCompile(`(?i)loopback|tailscale|zerotier|net-merge|docker|podman|^veth|^virbr|^br-|^wg\d|^tun\d|^tap\d|^zt`)
+	virtualDesc = regexp.MustCompile(`(?i)virtual|vpn|\btap\b|tap-|tunnel|wireguard|tailscale|zerotier|openvpn|pseudo`)
 )
 
 func DiscoverNics(include []string, weights map[string]float64) ([]Nic, error) {
@@ -33,16 +33,15 @@ func DiscoverNics(include []string, weights map[string]float64) ([]Nic, error) {
 	return nics, err
 }
 
+// discover physical adapters with default routes
 func DiscoverNicsDetailed(include []string, weights map[string]float64) ([]Nic, []Skip, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, nil, err
 	}
-	// Auto mode only takes real hardware adapters that have a default gateway (can reach the
-	// internet), per family. An explicit -include list overrides all of these checks.
 	var info map[int]adapterInfo
 	if len(include) == 0 {
-		info, _ = adapterInfos() // nil on error: fall back to name filtering only
+		info, _ = adapterInfos() // fallback to name filtering on error
 	}
 	var out []Nic
 	var skipped []Skip
@@ -80,10 +79,10 @@ func DiscoverNicsDetailed(include []string, weights map[string]float64) ([]Nic, 
 				continue
 			}
 			if v4 := ipn.IP.To4(); v4 != nil {
-				if ip4 == nil && !v4.IsLinkLocalUnicast() { // 169.254/16: no DHCP lease, no internet
+				if ip4 == nil && !v4.IsLinkLocalUnicast() { // ignore link local ipv4
 					ip4 = v4
 				}
-			} else if ip6 == nil && ipn.IP.IsGlobalUnicast() && !ipn.IP.IsPrivate() { // skips fe80:: and ULA
+			} else if ip6 == nil && ipn.IP.IsGlobalUnicast() && !ipn.IP.IsPrivate() { // ignore link local ipv6
 				ip6 = ipn.IP
 			}
 		}

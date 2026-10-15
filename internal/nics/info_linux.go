@@ -11,18 +11,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// adapterInfo is what Linux knows about an adapter beyond what package net exposes.
+// adapterinfo describes hardware backing and default routes
 type adapterInfo struct {
-	v4, v6  bool   // has an IPv4 / IPv6 default route (can reach the internet over that family)
-	virtual string // why this is not real network hardware; empty if it is
-	desc    string // kernel driver, e.g. iwlwifi, r8169, rndis_host, ipheth
+	v4, v6  bool   // default route availability
+	virtual string // virtual adapter description if not hardware
+	desc    string // kernel driver module name
 }
 
-// adapterInfos returns, per interface index, the adapters with their default-route families,
-// whether they are backed by hardware, and their driver. Real NICs (PCI, USB tethers, WWAN
-// modems) have a device link in sysfs; tunnels, VPNs, bridges, veth pairs and other software
-// interfaces don't. Default routes are read from every routing table, so adapters whose gateway
-// lives in a per-interface policy table are picked up too.
+// adapterinfos inspects sysfs and netlink routing tables
 func adapterInfos() (map[int]adapterInfo, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {

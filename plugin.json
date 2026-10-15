@@ -1,0 +1,17 @@
+{
+  "name": "NetMerge",
+  "author": "FlashWreck, sidharthify, rohit267",
+  "flags": [
+    "root"
+  ],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "network",
+      "utilities",
+      "performance"
+    ],
+    "description": "Combine Wi-Fi, Ethernet, and Phone Tethering into one aggregated connection for faster Steam downloads and parallel transfers.",
+    "image": "https://raw.githubusercontent.com/FlashWreck/net-merge-decky/main/assets/banner.png"
+  }
+}

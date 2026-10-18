@@ -52,6 +52,26 @@ NetMerge is purpose-built for SteamOS and the Steam Deck's custom AMD Van Gogh A
 - **Low-Latency TCP Socket Flags:** Outbound sockets enforce `TCP_NODELAY` to bypass Nagle's algorithm and `TCP_QUICKACK` to eliminate 40 ms delayed-ACK waits during concurrent Steam CDN chunk negotiations.
 - **Dynamic Wi-Fi Power Save Jitter Prevention:** SteamOS enables aggressive 802.11 power saving by default, causing latency to periodically spike from 15 ms to 150+ ms. NetMerge automatically turns Wi-Fi power save off while aggregation is active and restores it when paused or stopped to preserve battery.
 
+## Simple Installation
+
+Follow the standard Decky Loader flow to install:
+
+> **Decky Settings** &rarr; **General** &rarr; Enable **Developer mode** &rarr; Switch to **Desktop mode** &rarr; Download ZIP from GitHub [Releases](https://github.com/FlashWreck/net-merge-decky/releases) &rarr; **Decky Developer options** &rarr; **Install plugin from ZIP file**
+
+1. **Enable Developer Mode:** In the Quick Access Menu (`...`), open Decky Settings &rarr; **General** &rarr; enable **Developer mode**.
+2. **Download Release:** Switch to **Desktop mode**, visit the [Releases](https://github.com/FlashWreck/net-merge-decky/releases) page on GitHub, and download `net-merge-decky.zip`.
+3. **Install Plugin:** Open Decky Settings &rarr; **Developer** options &rarr; select **Install plugin from ZIP file** and select the downloaded ZIP file.
+
+## Manual Installation on Steam Deck
+
+1. Download `net-merge-decky.zip` from [Releases](https://github.com/FlashWreck/net-merge-decky/releases).
+2. Extract the folder to `/home/deck/homebrew/plugins/net-merge-decky`.
+3. Restart the Decky Loader daemon:
+   ```bash
+   sudo systemctl restart plugin_loader
+   ```
+4. Open the Quick Access Menu (`...` button) in Gaming Mode and open the NetMerge tab.
+
 ## Development and Build
 
 Prerequisites on Build Machine:
@@ -74,16 +94,6 @@ The compiled plugin package will be created at `out/net-merge-decky.zip`.
 # Deploy to Steam Deck over SSH and restart Decky Loader
 make deploy DECK_IP=<your-deck-ip>
 ```
-
-## Manual Installation on Steam Deck
-
-1. Download `net-merge-decky.zip` from Releases.
-2. Extract the folder to `/home/deck/homebrew/plugins/net-merge-decky`.
-3. Restart the Decky Loader daemon:
-   ```bash
-   sudo systemctl restart plugin_loader
-   ```
-4. Open the Quick Access Menu (`...` button) in Gaming Mode and open the NetMerge tab.
 
 ## Feedback, Testing & Feature Requests
 

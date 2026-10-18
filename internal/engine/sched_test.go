@@ -2,6 +2,7 @@ package engine
 
 import (
 	"net"
+	"syscall"
 	"testing"
 	"time"
 
@@ -309,5 +310,73 @@ func TestUpdateDropsVanishedWhenIdle(t *testing.T) {
 	s.Update(nil)
 	if len(s.Snapshot()) != 0 {
 		t.Fatal("NIC should be dropped once idle")
+	}
+}
+
+func TestReplugWithNewIndexStartsFresh(t *testing.T) {
+	a := nic("A", "10.0.0.1", 1)
+	a.Index = 5
+	s := NewScheduler([]nics.Nic{a})
+	old := s.Acquire(nil)
+	s.SetState(old, Fam4, false)
+	s.Fail(old, Fam4, time.Hour)
+
+	// device vanishes while a flow is still open, then returns with a new index
+	s.Update(nil)
+	a.Index = 9
+	s.Update([]nics.Nic{a})
+
+	got := s.Acquire(nil)
+	if got == nil || got == old {
+		t.Fatalf("want a fresh slot, got %v", got)
+	}
+	if got.Index != 9 {
+		t.Fatalf("want new index 9, got %d", got.Index)
+	}
+	if got.state[Fam4] != stateUnknown || !got.downUntil[Fam4].IsZero() {
+		t.Fatal("fresh slot must not inherit down state or cooldown")
+	}
+	if len(s.Snapshot()) != 1 {
+		t.Fatalf("old slot should be replaced, got %+v", s.Snapshot())
+	}
+	s.Release(old) // late release on the discarded slot must be harmless
+}
+
+func TestReplugSameIndexReverifies(t *testing.T) {
+	a := nic("A", "10.0.0.1", 1)
+	a.Index = 5
+	s := NewScheduler([]nics.Nic{a})
+	busy := s.Acquire(nil)
+	s.SetState(busy, Fam4, false)
+	s.Fail(busy, Fam4, time.Hour)
+	s.Update(nil)
+	s.Update([]nics.Nic{a})
+
+	got := s.Acquire(nil)
+	if got != busy {
+		t.Fatal("same device should keep its slot and live flows")
+	}
+	if got.state[Fam4] != stateUnknown || !got.downUntil[Fam4].IsZero() || !got.lastProbe[Fam4].IsZero() {
+		t.Fatal("reconnect must clear down state, cooldown and probe timer")
+	}
+}
+
+func TestStillPresentKeepsState(t *testing.T) {
+	a := nic("A", "10.0.0.1", 1)
+	a.Index = 5
+	s := NewScheduler([]nics.Nic{a})
+	sl := s.Acquire(nil)
+	s.SetState(sl, Fam4, false)
+	s.Update([]nics.Nic{a})
+	s.Update([]nics.Nic{a})
+	if sl.state[Fam4] != stateDown {
+		t.Fatal("rescans of a present adapter must not reset its state")
+	}
+}
+
+func TestClassifyMissingDeviceIsLinkDown(t *testing.T) {
+	c := classify(&net.OpError{Op: "dial", Err: syscall.ENODEV})
+	if !c.linkDown || !c.retry {
+		t.Fatalf("ENODEV should mark link down and retry, got %+v", c)
 	}
 }

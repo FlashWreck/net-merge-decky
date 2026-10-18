@@ -49,6 +49,7 @@ type Slot struct {
 	// guarded by mu
 	weight          [2]float64
 	present         bool
+	gone            bool // missing at the previous rescan
 	state           [2]linkState
 	lastProbe       [2]time.Time
 	downUntil       [2]time.Time
@@ -100,6 +101,12 @@ type Scheduler struct {
 	now   func() time.Time
 }
 
+func newSlot(n nics.Nic, a *slotAddr) *Slot {
+	sl := &Slot{Name: n.Name, Index: n.Index, key: n.Name, weight: [2]float64{n.Weight, n.Weight}, present: true}
+	sl.addr.Store(a)
+	return sl
+}
+
 func NewScheduler(nics []nics.Nic) *Scheduler {
 	s := &Scheduler{now: time.Now}
 	s.Update(nics)
@@ -129,22 +136,33 @@ func (s *Scheduler) Update(nics []nics.Nic) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sl := range s.slots {
+		sl.gone = !sl.present
 		sl.present = false
 	}
 	for _, n := range nics {
 		na := normAddr(n)
 		var found *Slot
-		for _, sl := range s.slots {
+		pos := -1
+		for i, sl := range s.slots {
 			if sl.key == n.Name {
-				found = sl
+				found, pos = sl, i
 				break
 			}
 		}
 		if found == nil {
-			sl := &Slot{Name: n.Name, Index: n.Index, key: n.Name, weight: [2]float64{n.Weight, n.Weight}, present: true}
-			sl.addr.Store(na)
-			s.slots = append(s.slots, sl)
+			s.slots = append(s.slots, newSlot(n, na))
 			continue
+		}
+		if found.Index != n.Index {
+			// device was recreated, so old binds are dead and the slot starts fresh
+			s.slots[pos] = newSlot(n, na)
+			continue
+		}
+		if found.gone {
+			// same device came back, verify it again right away
+			found.state = [2]linkState{}
+			found.downUntil = [2]time.Time{}
+			found.lastProbe = [2]time.Time{}
 		}
 		found.present = true
 		if !s.auto {

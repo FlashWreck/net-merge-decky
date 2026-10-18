@@ -100,7 +100,7 @@ func classify(err error) dialClass {
 	switch {
 	case errors.As(err, &dns):
 		return dialClass{}
-	case errors.Is(err, syscall.EADDRNOTAVAIL), errors.Is(err, syscall.ENETDOWN), errors.Is(err, syscall.ENETUNREACH):
+	case errors.Is(err, syscall.EADDRNOTAVAIL), errors.Is(err, syscall.ENETDOWN), errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.ENODEV):
 		return dialClass{retry: true, linkDown: true}
 	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ETIMEDOUT):
 		return dialClass{retry: true}

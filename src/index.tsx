@@ -10,7 +10,7 @@ import {
   ToggleField,
   staticClasses,
 } from "@decky/ui";
-import { callable, definePlugin } from "@decky/api";
+import { addEventListener, callable, definePlugin, removeEventListener, toaster } from "@decky/api";
 import { useEffect, useState, useMemo } from "react";
 import {
   FaEthernet,
@@ -60,6 +60,7 @@ interface SettingsResponse {
   mtu?: number;
   auto_weight?: boolean;
   include?: string;
+  link_notifications?: boolean;
 }
 
 // helper to safely extract error message
@@ -79,6 +80,22 @@ const setIpv6Mode = callable<[mode: string], StatusResponse>("set_ipv6_mode");
 const getSettings = callable<[], SettingsResponse>("get_settings");
 const saveSettings = callable<[settings: SettingsResponse], SettingsResponse>("save_settings");
 const cleanupRoutes = callable<[], boolean>("cleanup_routes");
+
+// helper to describe a link event from the backend
+function linkEventText(kind: string, name: string): string {
+  switch (kind) {
+    case "added":
+      return `${name} connected`;
+    case "up":
+      return `${name} is back online`;
+    case "down":
+      return `${name} has no internet`;
+    case "gone":
+      return `${name} disconnected`;
+    default:
+      return name;
+  }
+}
 
 // helper to format network throughput
 function formatSpeed(bytesPerSec: number): string {
@@ -181,6 +198,17 @@ function NetMergeContent() {
   const handleBootToggle = async (val: boolean) => {
     if (!settings) return;
     const updated = { ...settings, enabled_on_boot: val };
+    setSettings(updated);
+    try {
+      await saveSettings(updated);
+    } catch (e: unknown) {
+      setErrorMsg(getErrorMessage(e, "Error saving settings"));
+    }
+  };
+
+  const handleLinkNotifyToggle = async (val: boolean) => {
+    if (!settings) return;
+    const updated = { ...settings, link_notifications: val };
     setSettings(updated);
     try {
       await saveSettings(updated);
@@ -388,6 +416,15 @@ function NetMergeContent() {
       </PanelSectionRow>
 
       <PanelSectionRow>
+        <ToggleField
+          label="Link Notifications"
+          description="Notify when an adapter connects, disconnects or loses internet while aggregation is on"
+          checked={settings?.link_notifications !== false}
+          onChange={handleLinkNotifyToggle}
+        />
+      </PanelSectionRow>
+
+      <PanelSectionRow>
         <ButtonItem
           layout="below"
           onClick={handleCleanup}
@@ -451,6 +488,12 @@ function NetMergeContent() {
 }
 
 export default definePlugin(() => {
+  // listener lives here so toasts work while the menu is closed
+  const onLinkEvent = (kind: string, name: string) => {
+    toaster.toast({ title: "NetMerge", body: linkEventText(kind, name) });
+  };
+  const linkListener = addEventListener<[kind: string, name: string]>("link_event", onLinkEvent);
+
   return {
     name: "NetMerge",
     titleView: (
@@ -462,7 +505,7 @@ export default definePlugin(() => {
     content: <NetMergeContent />,
     icon: <FaNetworkWired />,
     onDismount() {
-      // clean up on dismount
+      removeEventListener("link_event", linkListener);
     },
   };
 });

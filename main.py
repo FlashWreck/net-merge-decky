@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 import decky
 
 def _safe_write_marker(path: str):
@@ -31,17 +32,92 @@ def _safe_save_json(path: str, data: dict):
         json.dump(data, f, indent=2)
     os.replace(tmp_path, path)
 
+# link notification timings
+LINK_POLL_SECS = 1.0
+LINK_HOLD_SECS = 5.0
+LINK_COOLDOWN_SECS = 20.0
+LINK_STATUS_MAX_AGE = 5.0
+WAKE_QUIET_SECS = 20.0
+
+class _LinkTracker:
+
+    def __init__(self):
+        self.confirmed = {}
+        self.pending = {}
+        self.last_event = {}
+        self.armed = False
+
+    def step(self, observed, now, quiet):
+        # observed is None while aggregation is off
+        if observed is None:
+            self.confirmed.clear()
+            self.pending.clear()
+            self.armed = False
+            return []
+        if quiet or not self.armed:
+            # adopt current states
+            self.confirmed = dict(observed)
+            self.pending.clear()
+            self.armed = True
+            return []
+
+        events = []
+        for name in set(self.confirmed) | set(observed):
+            seen = observed.get(name, "gone")
+            prev = self.confirmed.get(name, "gone")
+            if seen == "checking" or seen == prev:
+                self.pending.pop(name, None)
+                continue
+            if prev == "checking" and seen == "up":
+                self.confirmed[name] = seen
+                self.pending.pop(name, None)
+                continue
+
+            cand = self.pending.get(name)
+            if cand is None or cand[0] != seen:
+                self.pending[name] = (seen, now)
+                continue
+            if now - cand[1] < LINK_HOLD_SECS:
+                continue
+            last = self.last_event.get(name)
+            if last is not None and now - last < LINK_COOLDOWN_SECS:
+                continue
+
+            if seen == "gone":
+                kind = "gone"
+                self.confirmed.pop(name, None)
+            else:
+                kind = "down" if seen == "down" else ("added" if prev == "gone" else "up")
+                self.confirmed[name] = seen
+            self.pending.pop(name, None)
+            self.last_event[name] = now
+            events.append((kind, name))
+        return events
+
+def _link_state(nic: dict) -> str:
+    if not nic.get("present", True):
+        return "gone"
+    states = (nic.get("state"), nic.get("state6"))
+    if "up" in states:
+        return "up"
+    if "no internet" in states:
+        return "down"
+    return "checking"
+
 class Plugin:
     def __init__(self):
         self.process = None
         self.sleep_task = None
         self.was_on_before_sleep = False
+        self.link_task = None
+        self.quiet_until = 0.0
         self.default_settings = {
             "enabled_on_boot": False,
             "ipv6_mode": "auto",
             "mtu": 9000,
             "auto_weight": True,
-            "include": ""
+            "include": "",
+            "link_notifications": True
         }
 
     def _get_wifi_interfaces(self) -> list:
@@ -312,6 +388,37 @@ class Plugin:
             decky.logger.error(f"failed to cleanup routes: {e}")
             return False
 
+    def _read_link_states(self):
+        # returns None when aggregation is off or status is stale
+        path = os.path.join(self._get_state_dir(), "status.json")
+        try:
+            if time.time() - os.path.getmtime(path) > LINK_STATUS_MAX_AGE:
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not data.get("on"):
+            return None
+        return {n["name"]: _link_state(n) for n in data.get("nics") or [] if n.get("name")}
+
+    async def _link_monitor(self):
+        tracker = _LinkTracker()
+        try:
+            while True:
+                await asyncio.sleep(LINK_POLL_SECS)
+                try:
+                    now = time.monotonic()
+                    observed = self._read_link_states()
+                    events = tracker.step(observed, now, now < self.quiet_until)
+                    if events and self._load_settings().get("link_notifications", True):
+                        for kind, name in events:
+                            await decky.emit("link_event", kind, name)
+                except Exception as e:
+                    decky.logger.error(f"link monitor error: {e}")
+        except asyncio.CancelledError:
+            pass
+
     async def _sleep_monitor(self):
         # listen for prepare for sleep signals on dbus
         try:
@@ -330,6 +437,7 @@ class Plugin:
                 if "boolean true" in text:
                     # system going to sleep
                     decky.logger.info("system entering sleep, pausing net-merge")
+                    self.quiet_until = float("inf")
                     st = await self.get_status()
                     self.was_on_before_sleep = bool(st.get("on", False))
                     if self.was_on_before_sleep:
@@ -337,6 +445,7 @@ class Plugin:
                 elif "boolean false" in text:
                     # system woke up
                     decky.logger.info("system resumed from sleep")
+                    self.quiet_until = time.monotonic() + WAKE_QUIET_SECS
                     if self.was_on_before_sleep:
                         # wait for wifi and ethernet to reconnect
                         await asyncio.sleep(3.0)
@@ -353,6 +462,7 @@ class Plugin:
 
         # start sleep monitor in background
         self.sleep_task = asyncio.create_task(self._sleep_monitor())
+        self.link_task = asyncio.create_task(self._link_monitor())
 
         # auto-start daemon if configured
         if settings.get("enabled_on_boot", False):
@@ -364,6 +474,8 @@ class Plugin:
         self._set_wifi_low_latency(False)
         if self.sleep_task:
             self.sleep_task.cancel()
+        if self.link_task:
+            self.link_task.cancel()
         await self._stop_daemon()
 
     async def _uninstall(self):

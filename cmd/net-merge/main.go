@@ -97,7 +97,7 @@ func (c *common) nics() ([]nics.Nic, error) {
 }
 
 func (c *common) setup() error {
-	if err := os.MkdirAll(c.stateDir, 0o755); err != nil {
+	if err := state.EnsureDir(c.stateDir); err != nil {
 		return err
 	}
 	if c.logFile != "" {

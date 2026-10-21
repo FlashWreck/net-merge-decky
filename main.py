@@ -1,36 +1,126 @@
 # python backend for net-merge decky plugin
 
 import asyncio
+import errno
 import json
 import os
 import signal
+import stat
 import subprocess
-import tempfile
 import time
 import decky
 
-def _safe_write_marker(path: str):
+MAX_JSON_BYTES = 256 * 1024
+
+def _open_dir_pinned(path: str) -> int:
+    # open each component without following links
+    if not os.path.isabs(path):
+        raise ValueError("absolute path required")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_CLOEXEC
+    fd = os.open("/", flags)
     try:
-        os.unlink(path)
+        for part in (p for p in path.split("/") if p):
+            if part in (".", ".."):
+                raise ValueError("invalid path component")
+            next_fd = os.open(
+                part,
+                flags | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=fd
+            )
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def _read_json_at(dir_fd: int, name: str, limit: int = MAX_JSON_BYTES):
+    # read a json file from a pinned directory
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | os.O_CLOEXEC
+    )
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENXIO):
+            return None
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(65536, limit - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                return None
+            chunks.append(chunk)
+        return json.loads(b"".join(chunks))
+    finally:
+        os.close(fd)
+
+def _write_json_at(dir_fd: int, name: str, data: dict):
+    # write a json file through a pinned directory
+    tmp_name = f".{name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | os.O_CLOEXEC
+    )
+    fd = os.open(tmp_name, flags, 0o600, dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+
+def _touch_marker_at(dir_fd: int, name: str):
+    # create an empty marker in a pinned directory
+    try:
+        os.unlink(name, dir_fd=dir_fd)
     except FileNotFoundError:
         pass
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o644)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | os.O_CLOEXEC
+    )
+    fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
     os.close(fd)
 
-def _safe_save_json(path: str, data: dict):
-    dirname = os.path.dirname(path)
-    os.makedirs(dirname, exist_ok=True)
-    tmp_path = path + ".tmp"
+def _status_is_live(data: dict, mtime: float) -> bool:
+    # check freshness and pid before using status
+    if time.time() - mtime > 5.0:
+        return False
+    pid = data.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
     try:
-        os.unlink(tmp_path)
-    except FileNotFoundError:
-        pass
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(tmp_path, flags, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp_path, path)
+        os.kill(pid, 0)
+        with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as f:
+            return f.read().strip().startswith("net-merge")
+    except OSError:
+        return False
 
 # link notification timings
 LINK_POLL_SECS = 1.0
@@ -156,45 +246,70 @@ class Plugin:
         return os.path.join(plugin_dir, "bin", "net-merge")
 
     def _get_state_dir(self) -> str:
-        runtime_dir = getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", None)
-        if not runtime_dir:
-            if hasattr(os, "geteuid") and os.geteuid() == 0:
-                runtime_dir = "/run/net-merge-decky"
-            else:
-                uid = os.getuid() if hasattr(os, "getuid") else 0
-                runtime_dir = os.path.join(tempfile.gettempdir(), f"net-merge-decky-{uid}")
-        state_dir = os.path.join(runtime_dir, "state")
-        os.makedirs(state_dir, exist_ok=True)
+        # state dir must be root owned when running as root
+        if os.geteuid() == 0:
+            base = "/run/net-merge-decky"
+            os.makedirs(base, mode=0o700, exist_ok=True)
+            base_st = os.lstat(base)
+            if not stat.S_ISDIR(base_st.st_mode) or base_st.st_uid != 0:
+                raise RuntimeError(f"unsafe state base {base}")
+            os.chmod(base, 0o700)
+
+            state_dir = os.path.join(base, "state")
+            try:
+                os.mkdir(state_dir, 0o700)
+            except FileExistsError:
+                pass
+            state_st = os.lstat(state_dir)
+            if not stat.S_ISDIR(state_st.st_mode) or state_st.st_uid != 0:
+                raise RuntimeError(f"unsafe state dir {state_dir}")
+            os.chmod(state_dir, 0o700)
+            return state_dir
+
+        base = os.path.join(os.path.expanduser("~/.cache"), f"net-merge-{os.getuid()}")
+        state_dir = os.path.join(base, "state")
+        os.makedirs(state_dir, mode=0o700, exist_ok=True)
         return state_dir
 
-    def _get_settings_path(self) -> str:
+    def _get_settings_dir(self) -> str:
         settings_dir = getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", None)
-        if not settings_dir:
-            if hasattr(os, "geteuid") and os.geteuid() == 0:
-                settings_dir = "/run/net-merge-decky/settings"
-            else:
-                uid = os.getuid() if hasattr(os, "getuid") else 0
-                settings_dir = os.path.join(tempfile.gettempdir(), f"net-merge-decky-settings-{uid}")
-        os.makedirs(settings_dir, exist_ok=True)
-        return os.path.join(settings_dir, "settings.json")
+        if settings_dir:
+            # decky creates the settings directory
+            return settings_dir
+        if os.geteuid() == 0:
+            settings_dir = "/run/net-merge-decky/settings"
+            os.makedirs(settings_dir, mode=0o700, exist_ok=True)
+            return settings_dir
+
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        base = os.path.expanduser("~/.cache")
+        settings_dir = os.path.join(base, f"net-merge-settings-{uid}")
+        os.makedirs(settings_dir, mode=0o700, exist_ok=True)
+        return settings_dir
 
     def _load_settings(self) -> dict:
-        path = self._get_settings_path()
+        # read settings through a pinned directory
         try:
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    res = self.default_settings.copy()
-                    res.update(data)
-                    return res
+            dir_fd = _open_dir_pinned(self._get_settings_dir())
+            try:
+                data = _read_json_at(dir_fd, "settings.json")
+            finally:
+                os.close(dir_fd)
+            if isinstance(data, dict):
+                res = self.default_settings.copy()
+                res.update(data)
+                return res
         except Exception as e:
             decky.logger.error(f"failed to load settings: {e}")
         return self.default_settings.copy()
 
     def _save_settings_disk(self, s: dict):
-        path = self._get_settings_path()
         try:
-            _safe_save_json(path, s)
+            dir_fd = _open_dir_pinned(self._get_settings_dir())
+            try:
+                _write_json_at(dir_fd, "settings.json", s)
+            finally:
+                os.close(dir_fd)
         except Exception as e:
             decky.logger.error(f"failed to save settings: {e}")
 
@@ -250,13 +365,21 @@ class Plugin:
             return False
 
     async def _stop_daemon(self):
-        state_dir = self._get_state_dir()
-        # send quit marker
-        quit_marker = os.path.join(state_dir, "quit")
         try:
-            _safe_write_marker(quit_marker)
-        except Exception:
-            pass
+            state_dir = self._get_state_dir()
+        except Exception as e:
+            decky.logger.error(f"failed to resolve state dir: {e}")
+            state_dir = None
+
+        if state_dir:
+            try:
+                dir_fd = _open_dir_pinned(state_dir)
+                try:
+                    _touch_marker_at(dir_fd, "quit")
+                finally:
+                    os.close(dir_fd)
+            except Exception:
+                pass
 
         # wait for process to finish
         if self.process:
@@ -276,19 +399,32 @@ class Plugin:
             self.process = None
 
     async def get_status(self) -> dict:
-        state_dir = self._get_state_dir()
-        status_file = os.path.join(state_dir, "status.json")
-
-        if os.path.exists(status_file):
+        data = None
+        mtime = 0.0
+        try:
+            state_dir = self._get_state_dir()
+            dir_fd = _open_dir_pinned(state_dir)
             try:
-                with open(status_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    data["running"] = True
-                    return data
-            except Exception as e:
-                decky.logger.error(f"error reading status file: {e}")
+                st = os.stat(
+                    "status.json",
+                    dir_fd=dir_fd,
+                    follow_symlinks=False
+                )
+                if stat.S_ISREG(st.st_mode):
+                    mtime = st.st_mtime
+                    data = _read_json_at(dir_fd, "status.json")
+            finally:
+                os.close(dir_fd)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            decky.logger.error(f"error reading status file: {e}")
 
-        # if no status file is present
+        if isinstance(data, dict) and _status_is_live(data, mtime):
+            data["running"] = True
+            return data
+
+        # if no live status file is present
         return {
             "running": self.process is not None and self.process.poll() is None,
             "on": False,
@@ -311,9 +447,12 @@ class Plugin:
                         break
         else:
             marker_name = "on" if enabled else "off"
-            marker_path = os.path.join(state_dir, marker_name)
             try:
-                _safe_write_marker(marker_path)
+                dir_fd = _open_dir_pinned(state_dir)
+                try:
+                    _touch_marker_at(dir_fd, marker_name)
+                finally:
+                    os.close(dir_fd)
             except Exception as e:
                 decky.logger.error(f"failed to write marker {marker_name}: {e}")
 
@@ -338,11 +477,15 @@ class Plugin:
         self._save_settings_disk(s)
 
         state_dir = self._get_state_dir()
-        marker_path = os.path.join(state_dir, f"ipv6-{mode}")
+        marker_name = f"ipv6-{mode}"
         try:
-            _safe_write_marker(marker_path)
+            dir_fd = _open_dir_pinned(state_dir)
+            try:
+                _touch_marker_at(dir_fd, marker_name)
+            finally:
+                os.close(dir_fd)
         except Exception as e:
-            decky.logger.error(f"failed to write marker ipv6-{mode}: {e}")
+            decky.logger.error(f"failed to write marker {marker_name}: {e}")
 
         await asyncio.sleep(0.2)
         return await self.get_status()
@@ -390,17 +533,35 @@ class Plugin:
 
     def _read_link_states(self):
         # returns None when aggregation is off or status is stale
-        path = os.path.join(self._get_state_dir(), "status.json")
+        data = None
         try:
-            if time.time() - os.path.getmtime(path) > LINK_STATUS_MAX_AGE:
-                return None
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
+            dir_fd = _open_dir_pinned(self._get_state_dir())
+            try:
+                st = os.stat(
+                    "status.json",
+                    dir_fd=dir_fd,
+                    follow_symlinks=False
+                )
+                if not stat.S_ISREG(st.st_mode):
+                    return None
+                if time.time() - st.st_mtime > LINK_STATUS_MAX_AGE:
+                    return None
+                data = _read_json_at(dir_fd, "status.json")
+            finally:
+                os.close(dir_fd)
+        except Exception:
             return None
-        if not data.get("on"):
+
+        if not isinstance(data, dict) or not data.get("on"):
             return None
-        return {n["name"]: _link_state(n) for n in data.get("nics") or [] if n.get("name")}
+        nics = data.get("nics")
+        if not isinstance(nics, list):
+            return None
+        return {
+            n["name"]: _link_state(n)
+            for n in nics
+            if isinstance(n, dict) and isinstance(n.get("name"), str)
+        }
 
     async def _link_monitor(self):
         tracker = _LinkTracker()

@@ -3,6 +3,7 @@ package platform
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -35,31 +36,35 @@ const (
 )
 
 func fallbackLockPath() string {
-	return filepath.Join(os.TempDir(), "net-merge.lock")
+	return filepath.Join(os.TempDir(), fmt.Sprintf("net-merge-%d.lock", os.Getuid()))
 }
 
 func fallbackPidPath() string {
-	return filepath.Join(os.TempDir(), "net-merge.pid")
+	return filepath.Join(os.TempDir(), fmt.Sprintf("net-merge-%d.pid", os.Getuid()))
 }
 
 var lockFile *os.File
 
 func SingleInstance() bool {
-	var f *os.File
-	var err error
 	isRoot := os.Geteuid() == 0
+	lockPath := fallbackLockPath()
 	if isRoot {
-		f, err = os.OpenFile(rootLockPath, os.O_CREATE|os.O_RDWR, 0o600)
-		if err == nil {
-			_ = os.Chmod(rootLockPath, 0o600)
-		}
+		lockPath = rootLockPath
 	}
-	if f == nil || err != nil {
-		f, err = os.OpenFile(fallbackLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
-		if err != nil {
-			return false
-		}
+
+	f, err := os.OpenFile(
+		lockPath,
+		os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW,
+		0o600,
+	)
+	if err != nil {
+		log.Printf("single instance lock: %v", err)
+		return false
 	}
+	if isRoot {
+		_ = os.Chmod(rootLockPath, 0o600)
+	}
+
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		f.Close()
 		return false
@@ -69,13 +74,26 @@ func SingleInstance() bool {
 	_, _ = f.Seek(0, 0)
 	fmt.Fprintf(f, "%d\n", os.Getpid())
 
-	pidBytes := []byte(strconv.Itoa(os.Getpid()) + "\n")
 	pidPath := fallbackPidPath()
 	if isRoot {
 		pidPath = rootPidPath
 	}
-	_ = os.WriteFile(pidPath, pidBytes, 0o644)
+	writePID(pidPath, []byte(strconv.Itoa(os.Getpid())+"\n"))
 	return true
+}
+
+// writePID replaces the pid file without following links
+func writePID(path string, data []byte) {
+	f, err := os.OpenFile(
+		path,
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC|unix.O_NOFOLLOW,
+		0o644,
+	)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(data)
+	_ = f.Close()
 }
 
 func IsPIDRunning(pid int) bool {
@@ -96,11 +114,20 @@ func IsPIDRunning(pid int) bool {
 // InstanceRunning reports whether the daemon is actively running
 func InstanceRunning() bool {
 	checkLock := func(path string) (bool, bool) {
-		f, err := os.Open(path)
+		f, err := os.OpenFile(
+			path,
+			os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK,
+			0,
+		)
 		if err != nil {
 			return false, false
 		}
 		defer f.Close()
+
+		fi, err := f.Stat()
+		if err != nil || !fi.Mode().IsRegular() {
+			return false, false
+		}
 		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
 			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
@@ -114,7 +141,21 @@ func InstanceRunning() bool {
 	}
 
 	checkPID := func(path string) bool {
-		data, err := os.ReadFile(path)
+		f, err := os.OpenFile(
+			path,
+			os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK,
+			0,
+		)
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+
+		fi, err := f.Stat()
+		if err != nil || !fi.Mode().IsRegular() || fi.Size() > 64 {
+			return false
+		}
+		data, err := io.ReadAll(io.LimitReader(f, 64))
 		if err != nil {
 			return false
 		}

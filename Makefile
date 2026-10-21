@@ -17,7 +17,7 @@ build-backend:
 build-frontend:
 	pnpm run build
 
-package:
+package: build-backend build-frontend
 	rm -rf out/$(PLUGIN_NAME)
 	mkdir -p out/$(PLUGIN_NAME)/dist out/$(PLUGIN_NAME)/bin
 	cp plugin.json package.json main.py LICENSE README.md THIRD-PARTY-NOTICES.md out/$(PLUGIN_NAME)/

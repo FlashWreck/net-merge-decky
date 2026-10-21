@@ -316,6 +316,12 @@ class Plugin:
     async def get_settings(self) -> dict:
         return self._load_settings()
 
+    async def get_versions(self) -> dict:
+        return {
+            "plugin": getattr(decky, "DECKY_PLUGIN_VERSION", "unknown"),
+            "decky": getattr(decky, "DECKY_VERSION", "unknown"),
+        }
+
     async def save_settings(self, new_settings: dict) -> dict:
         s = self._load_settings()
         s.update(new_settings)

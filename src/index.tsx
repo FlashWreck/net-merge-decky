@@ -63,6 +63,11 @@ interface SettingsResponse {
   link_notifications?: boolean;
 }
 
+interface VersionsResponse {
+  plugin?: string;
+  decky?: string;
+}
+
 // helper to safely extract error message
 function getErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error) return err.message;
@@ -80,6 +85,7 @@ const setIpv6Mode = callable<[mode: string], StatusResponse>("set_ipv6_mode");
 const getSettings = callable<[], SettingsResponse>("get_settings");
 const saveSettings = callable<[settings: SettingsResponse], SettingsResponse>("save_settings");
 const cleanupRoutes = callable<[], boolean>("cleanup_routes");
+const getVersions = callable<[], VersionsResponse>("get_versions");
 
 // helper to describe a link event from the backend
 function linkEventText(kind: string, name: string): string {
@@ -122,6 +128,7 @@ function getAdapterIcon(name: string) {
 function NetMergeContent() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
+  const [versions, setVersions] = useState<VersionsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [cleaning, setCleaning] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -141,6 +148,14 @@ function NetMergeContent() {
         if (mounted) {
           setErrorMsg(getErrorMessage(e, "Failed to communicate with backend"));
         }
+      }
+
+      try {
+        const ver = await getVersions();
+        if (mounted) {
+          setVersions(ver);
+        }
+      } catch {
       }
     };
 
@@ -476,6 +491,24 @@ function NetMergeContent() {
     </PanelSection>
   );
 
+  const versionSection = versions ? (
+    <PanelSection>
+      <PanelSectionRow>
+        <div
+          style={{
+            color: "#777",
+            fontSize: "11px",
+            padding: "4px 0",
+            textAlign: "center",
+            width: "100%",
+          }}
+        >
+          Decky {versions.decky ?? "unknown"} | NetMerge {versions.plugin ?? "unknown"}
+        </div>
+      </PanelSectionRow>
+    </PanelSection>
+  ) : null;
+
   return (
     <div>
       {statusSection}
@@ -483,6 +516,7 @@ function NetMergeContent() {
       {adaptersSection}
       {settingsSection}
       {aboutSection}
+      {versionSection}
     </div>
   );
 }

@@ -175,7 +175,7 @@ func formatNICs(snap []engine.SlotStats) string {
 	return sb.String()
 }
 
-var version = "1.0.3-decky"
+var version = "1.0.4-decky"
 
 func main() {
 	if len(os.Args) < 2 {
